@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.check.outputs.tag }}"
-          IMAGE="ghcr.io/alexandervnuchkov/mstdn/"
+          IMAGE="ghcr.io/alexandervnuchkov/mstdn"
 
           # Проверка существования манифеста в GHCR
           # GHCR использует стандартный API registry
@@ -120,7 +120,7 @@ jobs:
       - name: Checkout Overrides Repo (Repo B)
         uses: actions/checkout@v4
         with:
-          repository: alexandervnuchkov/mstdn/ # Ваш форк/репозиторий с overrides
+          repository: alexandervnuchkov/mstdn # Ваш форк/репозиторий с overrides
           ref: main
           path: repo-b-context
 
