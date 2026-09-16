@@ -1,0 +1,188 @@
+name: Sync and Build Mastodon from Mirror
+
+on:
+  schedule:
+    - cron: '10 * * * *' # Каждые час, 10 минут
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Тег версии для ручной сборки, формат vX.Y[.Z...]'
+        required: true
+        type: string
+  # repository_dispatch не нужен, так как мы используем официальный GitHub репозиторий
+  # Если вы хотите триггерить из другого репозитория, можно оставить, но источник другой.
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      skip: ${{ steps.already-built.outputs.skip }}
+      latest_tag: ${{ steps.resolve.outputs.latest_tag }}
+    steps:
+      # Нам не нужно клонировать "Repo B" (ваш форк) только для валидации тега,
+      # но если в Repo B есть скрипты валидации, оставьте.
+      # Здесь мы проверяем теги из официального источника.
+      - name: Determine target tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          # Используем официальный репозиторий как источник тега
+          UPSTREAM_REPO="https://github.com/mastodon/mastodon.git"
+
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              TAG="${{ inputs.tag }}"
+              LATEST_TAG=""
+              ;;
+            schedule)
+              echo "Определяю последний тег в upstream (mastodon/mastodon)..."
+              # Запрашиваем теги из официального репозитория
+              mapfile -t mirror_tags < <(
+                git ls-remote --tags --refs "$UPSTREAM_REPO" \
+                  | sed 's#.*refs/tags/##' \
+                  | grep -E '^v[0-9]+(\.[0-9]+)*$' || true
+              )
+
+              if [ "${#mirror_tags[@]}" -eq 0 ]; then
+                echo "::error::В upstream не найдено ни одного тега."
+                exit 1
+              fi
+
+              # Сортируем по версии и берем последний
+              TAG=$(printf '%s\n' "${mirror_tags[@]}" | sort -V | tail -n1)
+              LATEST_TAG="$TAG"
+              echo "Последний тег: $TAG"
+              ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag format
+        id: check
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.resolve.outputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::Неверный формат тега: $TAG"
+            exit 1
+          fi
+          echo "Тег валиден: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if this tag was already built
+        id: already-built
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.check.outputs.tag }}"
+          IMAGE="ghcr.io/alexandervnuchkov/mstdn/"
+
+          # Проверка существования манифеста в GHCR
+          # GHCR использует стандартный API registry
+          if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
+            echo "Образ уже собран. Пропуск."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Если это не ручная сборка, проверяем, является ли тег последним
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]]; then
+            LATEST_TAG="${{ steps.resolve.outputs.latest_tag }}"
+            if [[ "$TAG" != "$LATEST_TAG" ]]; then
+              echo "Тег не последний. Пропуск."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "Сборка разрешена."
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: validate-tag
+    if: needs.validate-tag.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.validate-tag.outputs.tag }}
+      KEEP_LAST: 1
+      REGISTRY: ghcr.io
+      IMAGE_MASTODON: ghcr.io/alexandervnuchkov/mstdn/mastodon
+      IMAGE_STREAMING: ghcr.io/alexandervnuchkov/mstdn/mastodon-streaming
+
+    steps:
+      - name: Checkout Overrides Repo (Repo B)
+        uses: actions/checkout@v4
+        with:
+          repository: alexandervnuchkov/mstdn/ # Ваш форк/репозиторий с overrides
+          ref: main
+          path: repo-b-context
+
+      - name: Checkout Mastodon Source (Upstream)
+        uses: actions/checkout@v4
+        with:
+          repository: mastodon/mastodon # Официальный репозиторий
+          ref: ${{ needs.validate-tag.outputs.tag }}
+          path: source-code
+          fetch-depth: 0
+
+      - name: Apply Overrides
+        run: |
+          set -euo pipefail
+          # Убедитесь, что пути в вашем repo-b-context соответствуют этой структуре
+          src="repo-b-context/.github/mastodon-overrides/config/initializers/4_char_limit.rb"
+          dst="source-code/config/initializers/4_char_limit.rb"
+          mkdir -p "$(dirname "$dst")"
+          cp "$src" "$dst"
+
+          # Применяем скрипт для rack_attack
+          # Убедитесь, что скрипт существует в вашем repo-b-context
+          python3 repo-b-context/.github/mastodon-overrides/scripts/apply_rack_attack_limits.py \
+            source-code/config/initializers/rack_attack.rb \
+            repo-b-context/.github/mastodon-overrides/rack_attack_limits.yml
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Build Docker images
+        run: |
+          set -euo pipefail
+
+          echo "Сборка основного образа: ${IMAGE_MASTODON}:${TAG}"
+          # Убедитесь, что путь к Dockerfile верный для официального репозитория
+          # В официальном mastodon/mastodon обычно Dockerfile в корне
+          docker build -f source-code/Dockerfile -t ${IMAGE_MASTODON}:${TAG} -t ${IMAGE_MASTODON}:latest source-code
+
+          echo "Сборка streaming образа: ${IMAGE_STREAMING}:${TAG}"
+          # В официальном repo streaming Dockerfile может быть в другом месте
+          # Например: source-code/docker/Dockerfile-streaming
+          # Или source-code/streaming/Dockerfile (как в вашем оригинале)
+          # Проверьте структуру в mastodon/mastodon!
+          docker build -f source-code/streaming/Dockerfile -t ${IMAGE_STREAMING}:${TAG} -t ${IMAGE_STREAMING}:latest source-code
+
+      - name: Push images
+        run: |
+          set -euo pipefail
+
+          echo "Пушим ${IMAGE_MASTODON}:${TAG}"
+          docker push "${IMAGE_MASTODON}:${TAG}"
+          docker push "${IMAGE_MASTODON}:latest"
+
+          echo "Пушим ${IMAGE_STREAMING}:${TAG}"
+          docker push "${IMAGE_STREAMING}:${TAG}"
+          docker push "${IMAGE_STREAMING}:latest"

@@ -1,0 +1,22 @@
+# Список переопределений для config/initializers/rack_attack.rb
+#
+# Ключ  — имя throttle-правила, как оно указано первым аргументом
+#          в вызове throttle('<имя>', limit: ..., period: ...) do |req|
+# Значение — новое значение limit:, которое нужно подставить вместо
+#          значения, заданного в оригинальном файле Mastodon.
+#
+# Если throttle-правило встречается в исходном файле, но отсутствует
+# в этом списке — его limit: остаётся без изменений.
+#
+# Значения ниже взяты из .forgejo/mastodon-overrides/rack_attack_updated.rb
+# (актуальная версия rack_attack.rb с уже изменёнными лимитами).
+#
+# Добавляйте сюда новые правила по мере необходимости, не трогая сам workflow.
+
+throttle_authenticated_api: 30500
+throttle_per_token_api: 30000
+throttle_unauthenticated_api: 3000
+throttle_api_media: 3000
+throttle_media_proxy: 3000
+throttle_authenticated_paging: 30000
+throttle_unauthenticated_paging: 3000
