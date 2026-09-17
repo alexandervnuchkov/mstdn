@@ -82,12 +82,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.check.outputs.tag }}"
-          IMAGE="ghcr.io/alexandervnuchkov/mstdn"
+          IMAGE_MASTODON="ghcr.io/alexandervnuchkov/mstdn/mastodon"
+          IMAGE_STREAMING="ghcr.io/alexandervnuchkov/mstdn/mastodon-streaming"
 
-          # Проверка существования манифеста в GHCR
-          # GHCR использует стандартный API registry
-          if docker manifest inspect "${IMAGE}:${TAG}" > /dev/null 2>&1; then
-            echo "Образ уже собран. Пропуск."
+          # Проверяем существование обоих образов в GHCR
+          if docker manifest inspect "${IMAGE_MASTODON}:${TAG}" > /dev/null 2>&1 \
+             && docker manifest inspect "${IMAGE_STREAMING}:${TAG}" > /dev/null 2>&1; then
+            echo "Образы уже собраны. Пропуск."
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
